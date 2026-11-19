@@ -29,7 +29,7 @@ with Database("strataleaf.db") as db:
 
 `python3 -m compileall -q strataleaf examples` 检查源码可编译。`python3 -m examples.workflows commit` 在独立临时目录运行多集合提交、重复请求和回滚示例，打印实际结果后自动清理。可用示例名：
 
-`catalog schema commit snapshot query index feed backup replica compact expire aggregate patch inspect transfer`
+`catalog schema commit snapshot query index feed backup replica compact expire aggregate patch inspect transfer reference`
 
 每个示例约一秒以内，不需要联网。它们是生产 API 的有限工作流演示；自动化测试仍为 **deferred**，仓库不含测试套件，也不声明测试命令。`examples.observations` 另外提供写锁竞争与保留水位的可复现观测。
 
@@ -41,6 +41,7 @@ with Database("strataleaf.db") as db:
 - 查询支持嵌套布尔谓词与等值、范围、集合成员、存在性判断，按文档键升序分页。签名游标固定集合、谓词、读版本与键边界，可调整页大小。索引只服务当前版本；历史读取回退版本扫描，最终谓词始终复核。
 - `None` 和缺失字段不同，比较缺失字段不匹配；数值比较不把布尔值当数字。分组跳过缺失分组字段，显式空值保留；非数值度量不计入平均分母。
 - 读保留点和订阅确认位置限制回收水位；分页游标本身不自动注册保留点。需要跨长时操作的调用方应先 pin；水位已超过游标时明确拒绝。回收保留水位及其后完整读视图。已登记请求的幂等回执不随历史回收删除。
+- 固定版本引用（`db.references`）把目标锚定到具体文档版本 `(集合, 键, 修订)`：目标之后被改写、删除或同键重建都不改变引用含义。引用可脱离来源，也可携带在某个来源版本上；批次内用 `batch().reference(...)` 与文档写入一同提交，失败整批不可见。来源版本仍可由普通读取观察到（其修订不低于 floor，或是该键 floor 处的基准版本，即普通按键读取返回的那一版）时，其引用继续有效并保护目标不被回收；来源被替换或删除且相关历史已回收后引用变为休眠，可显式 `release`/`release_dormant` 解除。一个目标可被多条引用共享，引用来源还可继续被引用，回收按目标到来源的可达链计算，释放单个引用不影响其他可达内容；未被引用的普通历史照常回收，不会永久钉住。`references.get` 是唯一能读到 floor 之前版本的路径，普通 `get`/`query`/`aggregate` 的按键历史读取仍按原规则在 floor 下拒绝。备份与恢复保留引用并校验其目标可解析。
 - 变更流一次交付完整提交，消费方负责成功处理后确认；确认可前进到当前 head，系统不替消费方证明处理成功。释放消费者即放弃它的历史保护。
 - 备份使用 SQLite 在线备份 API，发布到未占用目标；校验摘要后恢复到新文件，禁止覆盖现有文件。恢复为新主库会生成新的数据库标识及游标签名密钥，保留文档版本；恢复为副本则绑定原主库。进程间不得直接复制活动 WAL 主文件代替备份。
 - 副本只能接收同一上游、连续的提交包。重复范围不重复写入；校验错误和缺口整包失败。分段追赶时使用版本扫描，追到导出端 head 才安装最新索引。目录 epoch 防止过时的同版本包倒退目录。副本不接收主库写入；基线不提供提升接口、双向复制或网络传输。导出校验和检测意外损坏，不代替对端身份认证。

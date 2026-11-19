@@ -19,7 +19,8 @@
       "同一历史读版本完成分组和数值计算",
       "读后修改受版本前置条件保护",
       "物理完整性与逻辑引用一致性可观察",
-      "外部文档流验证后整批导入"
+      "外部文档流验证后整批导入",
+      "固定版本引用跨改写重建保持含义且回收按可达性保留"
     ]
   },
   "project_shape": "backend",
@@ -225,6 +226,19 @@
       "owned_facts": "游标签名与数据库绑定",
       "consumers": [
         "query"
+      ]
+    },
+    {
+      "id": "reference",
+      "path": "strataleaf/references.py",
+      "responsibility": "固定版本引用的身份、可达性与解除",
+      "owned_facts": "固定版本引用的身份、可达性与解除",
+      "consumers": [
+        "reference",
+        "snapshot",
+        "compact",
+        "backup",
+        "inspect"
       ]
     }
   ],
@@ -513,6 +527,26 @@
       "success": "外部文档流验证后整批导入",
       "failure": "重复键整体拒绝",
       "verification": "python3 -m examples.workflows transfer"
+    },
+    {
+      "id": "reference",
+      "name": "固定版本引用",
+      "entry": "Database.references.create",
+      "module_ids": [
+        "reference",
+        "snapshot",
+        "compact",
+        "storage",
+        "backup"
+      ],
+      "steps": [
+        "输入校验与读取已有事实",
+        "固定版本身份与可达依赖",
+        "形成可观察结果"
+      ],
+      "success": "引用跨改写重建保持含义且回收不破坏可达内容",
+      "failure": "悬空或已回收引用明确拒绝",
+      "verification": "python3 -m examples.workflows reference"
     }
   ],
   "complexity": {

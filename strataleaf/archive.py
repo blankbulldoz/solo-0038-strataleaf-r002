@@ -6,6 +6,7 @@ import secrets
 import uuid
 from pathlib import Path
 from .errors import Conflict, DatabaseError, InvalidDocument
+from .references import protected_identities
 
 
 def file_digest(path):
@@ -18,6 +19,7 @@ def file_digest(path):
 
 def inspect_archive(path):
     connection = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
     try:
         result = connection.execute("PRAGMA integrity_check").fetchone()[0]
         values = dict(connection.execute("SELECT key,value FROM meta"))
@@ -26,8 +28,24 @@ def inspect_archive(path):
             raise DatabaseError("archive is not a supported intact database")
         if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
             raise DatabaseError("archive has broken references")
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        reference_count = 0
+        if "version_refs" in tables:
+            # Dormant rows may legitimately outlive a reclaimed target; only a
+            # reference that still protects content must be resolvable.
+            active = protected_identities(connection, int(values["floor"]))[1]
+            dangling = [row[0] for row in connection.execute("SELECT name FROM version_refs ORDER BY name")
+                        if row[0] in active and connection.execute(
+                            """SELECT 1 FROM version_refs r WHERE r.name=? AND NOT EXISTS
+                               (SELECT 1 FROM versions v WHERE v.collection=r.target_collection
+                                AND v.key=r.target_key AND v.rev=r.target_revision)""",
+                            (row[0],)).fetchone()]
+            if dangling:
+                raise DatabaseError("archive contains unresolvable active fixed-version references")
+            reference_count = connection.execute("SELECT COUNT(*) FROM version_refs").fetchone()[0]
         return {"revision": int(values["head"]), "floor": int(values["floor"]),
-                "database_id": values["database_id"], "sha256": file_digest(path)}
+                "database_id": values["database_id"], "sha256": file_digest(path),
+                "references": reference_count}
     except (sqlite3.DatabaseError, KeyError, ValueError) as exc:
         raise DatabaseError("invalid database archive") from exc
     finally:

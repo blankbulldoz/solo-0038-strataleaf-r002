@@ -2,6 +2,7 @@ import math
 from .codec import name
 from .errors import Conflict, InvalidDocument, NotFound
 from .mvcc import checked_revision
+from .references import protected_identities
 from .transaction import WriteBatch
 
 
@@ -31,13 +32,33 @@ class Retention:
             prior = int(self.store.get("floor"))
             if boundary < prior:
                 raise Conflict("retention metadata violates current floor")
-            removed = connection.execute("""DELETE FROM versions WHERE rev<? AND EXISTS
+            protected, active = protected_identities(connection, boundary)
+            candidates = connection.execute("""SELECT collection,key,rev FROM versions WHERE rev<? AND EXISTS
               (SELECT 1 FROM versions newer WHERE newer.collection=versions.collection
-               AND newer.key=versions.key AND newer.rev>versions.rev AND newer.rev<=?)""", (boundary, boundary)).rowcount
+               AND newer.key=versions.key AND newer.rev>versions.rev AND newer.rev<=?)""",
+                                            (boundary, boundary)).fetchall()
+            removed = 0
+            for row in candidates:
+                if (row["collection"], row["key"], row["rev"]) in protected:
+                    continue
+                connection.execute("DELETE FROM versions WHERE collection=? AND key=? AND rev=?",
+                                   (row["collection"], row["key"], row["rev"]))
+                removed += 1
             logs = connection.execute("DELETE FROM commits WHERE rev<=?", (boundary,)).rowcount
             self.store.set("floor", boundary)
             return {"requested": target, "floor": boundary, "removed_versions": removed,
-                    "removed_commits": logs, "blocked": boundary < target}
+                    "removed_commits": logs, "protected_versions": len(protected),
+                    "active_references": len(active), "blocked": boundary < target}
+
+    def protected(self):
+        """Report the fixed-version targets that compaction currently protects."""
+        with self.store.read() as connection:
+            floor = int(self.store.get("floor"))
+            protected, active = protected_identities(connection, floor)
+            return {"floor": floor,
+                    "versions": [{"collection": collection, "key": key, "revision": revision}
+                                 for collection, key, revision in sorted(protected)],
+                    "references": sorted(active)}
 
     def sweep(self, now, limit=1000):
         if isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(now):

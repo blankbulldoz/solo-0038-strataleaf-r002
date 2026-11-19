@@ -1,6 +1,8 @@
 # 恢复与观测
 
-备份必须调用 archives.backup，不能只拷贝活动主文件。backup 与 restore 都不覆盖存在目标；恢复使用新路径，先校验来源 SHA-256，再打开新句柄。主库恢复生成新身份，副本恢复绑定来源。恢复清理原机保留点与消费者；消费方重新注册时须根据已恢复的 floor/head 判断是否需要重建。
+备份必须调用 archives.backup，不能只拷贝活动主文件。backup 与 restore 都不覆盖存在目标；恢复使用新路径，先校验来源 SHA-256，再打开新句柄。主库恢复生成新身份，副本恢复绑定来源。恢复清理原机保留点与消费者；消费方重新注册时须根据已恢复的 floor/head 判断是否需要重建。固定版本引用随备份一起复制；保留下来的目标版本与引用在恢复后可继续通过 references.get 读取，恢复不清除引用。归档校验拒绝仍处于活跃状态却丢失目标版本的引用，避免把不可解析的依赖当作可恢复数据；来源历史已回收的休眠引用可以保留。
+
+引用不阻止回收无关历史：不需要的引用应显式 `references.release`，来源已被回收的可用 `references.release_dormant`。`references.states` 与 `diagnostics.inspect` 的 references 段报告活跃、休眠与悬空引用，便于判断是否还有依赖在保护 floor 以下的版本。
 
 diagnostics.inspect(deep=True) 检查 SQLite 完整性、外键、提交连续性、当前索引与文档投影；fingerprint 比较指定读视图的键、文档版本、内容及到期事实。前者不能证明所有业务数据正确，后者相同也不能代替模式与索引定义比对。checkpoint 返回 SQLite 的 busy、log、checkpointed 信息，并不承诺截断 WAL。
 

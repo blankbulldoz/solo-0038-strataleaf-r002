@@ -17,8 +17,10 @@ class Replication:
             body = {"format": 1, "source": self.store.get("database_id"), "since": since,
                 "through": commits[-1]["revision"] if commits else since,
                 "catalog_epoch": int(self.store.get("catalog_epoch")), "head": int(self.store.get("head")), "floor": int(self.store.get("floor")),
+                "reference_epoch": int(self.store.get("reference_epoch")),
                 "collections": [dict(row) for row in connection.execute("SELECT * FROM collections ORDER BY name")],
                 "indexes": [dict(row) for row in connection.execute("SELECT * FROM index_defs ORDER BY collection,name")],
+                "references": [dict(row) for row in connection.execute("SELECT * FROM version_refs ORDER BY name")],
                 "commits": commits}
             return {"body": body, "sha256": digest(body)}
 
@@ -37,7 +39,11 @@ class Replication:
                 head = int(self.store.get("head"))
                 if body["since"] > head:
                     raise ReplicationError("missing preceding replication range")
-                if body["through"] < head or (body["through"] == head and body["catalog_epoch"] <= int(self.store.get("catalog_epoch"))):
+                reference_epoch = body.get("reference_epoch", int(self.store.get("reference_epoch")))
+                if (body["through"] < head
+                        or (body["through"] == head
+                            and body["catalog_epoch"] <= int(self.store.get("catalog_epoch"))
+                            and reference_epoch <= int(self.store.get("reference_epoch")))):
                     return {"revision": head, "applied": 0}
                 for definition in body["collections"]:
                     connection.execute("INSERT INTO collections VALUES (?,?,?) ON CONFLICT(name) DO UPDATE SET schema=excluded.schema,generation=excluded.generation",
@@ -59,6 +65,18 @@ class Replication:
                     applied += 1
                 self.store.set("head", body["through"])
                 self.store.set("catalog_epoch", body["catalog_epoch"] if body["through"] == body["head"] else -1)
+                # Fixed-version references are copied as one consistent set
+                # once the replica has reached the exported head, so their
+                # exact target versions are present with the same identities.
+                if body["through"] == body["head"]:
+                    connection.execute("DELETE FROM version_refs")
+                    for row in body.get("references", ()):
+                        connection.execute("INSERT INTO version_refs VALUES (?,?,?,?,?,?,?,?)",
+                                           (row["name"], row["source_collection"], row["source_key"], row["source_revision"],
+                                            row["target_collection"], row["target_key"], row["target_revision"], row["created_revision"]))
+                    self.store.set("reference_epoch", reference_epoch)
+                else:
+                    self.store.set("reference_epoch", -1)
                 from .mvcc import visible_rows
                 for collection in connection.execute("SELECT name FROM collections").fetchall():
                     for row in visible_rows(connection, collection[0], body["through"]):

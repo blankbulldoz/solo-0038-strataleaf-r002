@@ -2,7 +2,7 @@ import json
 import sys
 import tempfile
 from pathlib import Path
-from strataleaf import Database, Archives, Conflict, InvalidDocument, InvalidCursor, ReadOnly, SnapshotTooOld, ReplicationError
+from strataleaf import Database, Archives, Conflict, InvalidDocument, InvalidCursor, InvalidReference, ReadOnly, SnapshotTooOld, ReplicationError
 
 SCHEMA = {"fields": {"region": "string", "sequence": "integer", "code": "string"}, "required": ["region", "sequence"]}
 
@@ -145,6 +145,54 @@ def run(flow):
                           "duplicate": rejected(lambda: db.transfer.import_lines("copy_segments", exported["lines"]), Conflict)}
                 if len(db.query("copy_segments").records) != 6:
                     raise RuntimeError("logical import differs")
+            elif flow == "reference":
+                # A fixed-version reference remembers exactly which version it
+                # saw; later rewrites and same-key recreation cannot change it.
+                target = first
+                rewritten = db.batch().put("segments", "seg_00", {"region": "south", "sequence": 40}).commit().revision
+                db.batch().delete("segments", "seg_00").commit()
+                recreated = db.batch().put("segments", "seg_00", {"region": "north", "sequence": 99}).commit().revision
+                carried = db.batch("carry_reference").put("segments", "reader", {"region": "east", "sequence": 1}) \
+                    .reference("heading_v1", target=("segments", "seg_00", target), source=("segments", "reader")).commit()
+                if db.references.get("heading_v1").document != {"region": "east", "sequence": 0, "code": "c0"}:
+                    raise RuntimeError("fixed-version reference changed meaning")
+                db.references.create("heading_detached", target=("segments", "seg_00", target))
+                rewrite = db.references.create("heading_live", target=("segments", "seg_00", recreated))
+                # Two sources share the same old version, and the old version
+                # itself carries a further reference: a small dependency graph.
+                db.references.create("heading_chain", target=("segments", "seg_00", rewritten),
+                                     source=("segments", "seg_00", target))
+                failed = rejected(lambda: db.batch("bad_reference").put("segments", "rolled_back", {"region": "east", "sequence": 2})
+                                  .reference("broken", target=("segments", "seg_00", 10_000)).commit(), InvalidReference)
+                if db.get("segments", "rolled_back") is not None or db.references.exists("broken"):
+                    raise RuntimeError("failed reference batch left visible state")
+                before = db.references.get("heading_v1").document
+                db.retention.pin("reader", db.revision)
+                compacted = db.retention.compact(db.revision)
+                protected = db.references.get("heading_v1").document
+                if protected != before:
+                    raise RuntimeError("compaction changed a protected reference")
+                # Releasing one of the sharing sources must not disturb the
+                # other reachable reference to the same old version.
+                db.references.release("heading_detached")
+                still_protected = db.references.get("heading_v1").document
+                chain = db.references.get("heading_chain").document
+                # Reopen the same file: refs and protected versions persist.
+                with Database(folder / "source.db") as reopened:
+                    reopened_heading = reopened.references.get("heading_v1").document
+                    reopened_live = reopened.references.get("heading_live").document
+                    reopened_current = reopened.get("segments", "seg_00").document
+                    reopened_floor = reopened.diagnostics.inspect()["floor"]
+                output = {"rewritten": rewritten, "recreated": recreated, "carried": carried.__dict__,
+                          "created": rewrite.as_dict(), "rejected": failed, "before_compaction": before,
+                          "compacted": compacted, "protected": protected,
+                          "after_shared_release": still_protected, "chain": chain,
+                          "reopened": {"floor": reopened_floor, "heading_v1": reopened_heading,
+                                       "heading_live": reopened_live, "current": reopened_current},
+                          "ordinary_old_read": rejected(lambda: db.get("segments", "seg_00", target), SnapshotTooOld),
+                          "current": db.get("segments", "seg_00").document, "protection": db.retention.protected()}
+                if still_protected != before or reopened_heading != {"region": "east", "sequence": 0, "code": "c0"}:
+                    raise RuntimeError("shared or reopened reference lost its meaning")
             else:
                 raise ValueError("unknown example workflow: " + flow)
             print(json.dumps({"workflow": flow, "result": output}, ensure_ascii=False, sort_keys=True, default=str))

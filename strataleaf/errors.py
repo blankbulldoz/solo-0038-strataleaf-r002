@@ -16,6 +16,10 @@ class SnapshotTooOld(DatabaseError):
 class InvalidCursor(DatabaseError):
     pass
 
+class InvalidReference(DatabaseError):
+    """A fixed-version reference is malformed, dangling, or no longer resolvable."""
+    pass
+
 class ReadOnly(DatabaseError):
     pass
 
